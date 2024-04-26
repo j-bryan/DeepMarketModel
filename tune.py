@@ -9,7 +9,7 @@ from trainer import SupervisedTrainer
 from dataloader import load_data
 
 
-def define_model(trial: optuna.Trial):
+def define_model(trial: optuna.Trial, n_input_vars: int, n_target_vars: int) -> torch.nn.Module:
     """
     Defines a time series deep learning model based on LSTM, RNN, or GRU with hyperparameters tuned
     by Optuna.
@@ -18,8 +18,6 @@ def define_model(trial: optuna.Trial):
     :return: torch.nn.Module: The deep learning model
     """
     # Constant parameters
-    n_input_vars = 3
-    n_target_vars = 1
     batch_first = True
 
     # Tuned hyperparameters parameters
@@ -77,15 +75,43 @@ def define_model(trial: optuna.Trial):
     return model
 
 
-def tune_model():
+def tune_model(**kwargs):
     """"
     Tunes the hyperparameters of a deep learning model using Optuna. At the moment, there are 10
     parameters to tune: 8 model hyperparameters and 2 optimizer hyperparameters.
     """
-    train_loader, test_loader, xtrans, ytrans = load_data()
+    # Parse kwargs
+    iso = kwargs["iso"]
+    device = kwargs["device"]
+    epochs = kwargs["epochs"]
+    study_name = kwargs["study_name"]
+    load_if_exists = kwargs["load_if_exists"]
+    n_trials = kwargs["n_trials"]
+    batch_size = kwargs["batch_size"]
+    segment_length = kwargs["segment_length"]
+    storage = kwargs["storage"]
+    no_storage = kwargs["storage"]
+    n_jobs = kwargs["n_jobs"]
 
+    if "%ISO%" in study_name:
+        study_name = study_name.replace("%ISO%", iso.upper())
+
+    if storage in kwargs and no_storage:
+        raise ValueError("Cannot provide both storage and no_storage arguments.")
+    if no_storage:
+        storage = None
+
+    # Load data. We extract the dimensionality of the input and target variables from the data loader.
+    train_loader, test_loader, xtrans, ytrans = load_data(iso, batch_size, segment_length)
+    n_input_vars = next(iter(train_loader))[0].shape[-1]
+    n_target_vars = next(iter(train_loader))[1].shape[-1]
+
+    # Define the objective function for Optuna. This dynamically defines the model based on parameters
+    # suggested by the Optuna trial object. The hyperparameters are optimized using RMSE because RMSE
+    # is interpretable (same units as the target variable) and is sensitive to outlier price values,
+    # which are important to plant economics.
     def objective(trial: optuna.Trial):
-        model = define_model(trial)  # 8 tuned model hyperparameters
+        model = define_model(trial, n_input_vars, n_target_vars)  # 8 tuned model hyperparameters
 
         # 2 tuned optimizer hyperparameters
         learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-1, log=True)
@@ -94,21 +120,47 @@ def tune_model():
 
         criterion = torch.nn.MSELoss()
 
-        # device = "cpu" if model.encoder.hidden_size < 512 else "mps"
-        device = "cpu"
-
         trainer = SupervisedTrainer(model, criterion, optimizer, device)
         results = trainer.train(train_loader=train_loader,
                                 test_loader=test_loader,
-                                n_epochs=200)
+                                n_epochs=epochs)
         test_rmse = trainer.evaluate(test_loader, ytrans) ** 0.5
 
         return test_rmse
 
-    storage = "sqlite:///miso.db"
-    study = optuna.create_study(storage=storage, study_name="MISO", direction="minimize", load_if_exists=True)
-    study.optimize(objective, n_trials=500)
+    study = optuna.create_study(storage=storage, study_name=study_name, direction="minimize", load_if_exists=load_if_exists)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
 
 
 if __name__ == "__main__":
-    tune_model()
+    import argparse
+    parser = argparse.ArgumentParser(description="Tune hyperparameters for deep learning models.")
+
+    #========================
+    #   REQUIRED ARGUMENTS
+    #========================
+    parser.add_argument("--iso", type=str, required=True, help="The ISO to tune model")  # required arguments
+
+    #========================
+    #   OPTIONAL ARGUMENTS
+    #========================
+    # Optuna arguments
+    parser.add_argument("--study-name", type=str, default="%ISO%", help="The name of the Optuna study. If not provided, the ISO name will be used.")
+    parser.add_argument("--n-trials", type=int, default=10, help="The number of trials to run.")
+    parser.add_argument("--load-if-exists", action="store_true", help="Load the study if it exists.")
+    parser.add_argument("--storage", type=str, default="sqlite:////market_parameter_tuning.db", help="The storage URL for the Optuna study.")
+    parser.add_argument("--no-storage", action="store_true", help="Do not store the Optuna study.")
+    parser.add_argument("--n-jobs", type=int, default=1, help="Number of threads to use in the Optuna study. "
+                        "WARNING: This may be slow due to Python's GIL lock. Consider using process-based parallelism instead!")
+
+    # Data arguments
+    parser.add_argument("--batch-size", type=int, default=64, help="The batch size for the data loader.")
+    parser.add_argument("--segment-length", type=int, default=24, help="The segment length for the data loader.")
+
+    # Model training arguments
+    parser.add_argument("--epochs", type=int, default=30, help="The number of epochs to train each model.")
+    parser.add_argument("--device", type=str, default="cpu", help="The device to run the model on.")
+
+    args = vars(parser.parse_args())
+
+    tune_model(**args)

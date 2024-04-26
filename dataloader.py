@@ -128,7 +128,7 @@ class BatchedTransformer:
         return self.transform(X)
 
 
-def get_dataloaders(iso: str = 'miso',
+def get_dataloaders(iso: str,
                     segment_length: int | None = None,
                     x_pipeline: BatchedTransformer | None = None,
                     y_pipeline: BatchedTransformer | None = None,
@@ -141,6 +141,7 @@ def get_dataloaders(iso: str = 'miso',
     :param segment_length: int: The length of the segment to use. Any leftover data will be discarded!
     :param x_pipeline: TensorTransformer: A pipeline to transform the X data. Works with tensors.
     :param y_pipeline: TensorTransformer: A pipeline to transform the y data. Works with tensors.
+    :param kwargs: dict: Additional parameters handled (test_size, shuffle, random_state, batch_size)
     """
     # Fetch the data from file
     data = pd.read_csv(f"data/{iso.upper()}/{iso}.csv", index_col=0)
@@ -193,7 +194,7 @@ def get_dataloaders(iso: str = 'miso',
     return tuple(return_vals)
 
 
-def load_data(batch_size: int = 64, segment_length: int = 24, **kwargs):
+def load_data(iso: str, batch_size: int = 64, segment_length: int = 24, **kwargs):
     # MISO data regressors loaded as [TOTALLOAD, NGPRICE, WIND, SOLAR]
     # We want to scale TOTALLOAD and NGPRICE to be centered around 0 and scaled by the IQR (robust scaling).
     # WIND and SOLAR are already between 0 and 1, so we won't do any additional scaling.
@@ -209,7 +210,7 @@ def load_data(batch_size: int = 64, segment_length: int = 24, **kwargs):
     xtrans = BatchedTransformer(xtrans)
     ytrans = BatchedTransformer(ytrans)
 
-    train_loader, test_loader, xtrans, ytrans = get_dataloaders(iso='MISO',
+    train_loader, test_loader, xtrans, ytrans = get_dataloaders(iso=iso,
                                                                 segment_length=segment_length,
                                                                 x_pipeline=xtrans,
                                                                 y_pipeline=ytrans,
