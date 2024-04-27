@@ -1,6 +1,8 @@
 """
 Hyperparameter tuning for deep learning models.
 """
+import json
+
 import optuna
 import torch
 
@@ -121,14 +123,22 @@ def tune_model(**kwargs):
         criterion = torch.nn.MSELoss()
 
         trainer = SupervisedTrainer(model, criterion, optimizer, device)
-        results = trainer.train(train_loader=train_loader,
-                                test_loader=test_loader,
-                                n_epochs=epochs)
-        test_rmse = trainer.evaluate(test_loader, ytrans) ** 0.5
+        try:
+            # Intermediate test results are reported to Optuna. trainer.train() may raise an optuna.TrialPruned
+            # exception if the trial is pruned. This is caught by the Optuna study object and dealt
+            # with appropriately.
+            results = trainer.train(train_loader=train_loader,
+                                    test_loader=test_loader,
+                                    n_epochs=epochs,
+                                    optuna_trial=trial)
+            test_rmse = trainer.evaluate(test_loader, ytrans) ** 0.5
+        except ValueError:  # Catch things like NaN and inf problems so the whole study doesn't crash
+            test_rmse = 1e6
 
         return test_rmse
 
-    study = optuna.create_study(storage=storage, study_name=study_name, direction="minimize", load_if_exists=load_if_exists)
+    pruner = optuna.pruners.HyperbandPruner()
+    study = optuna.create_study(storage=storage, study_name=study_name, direction="minimize", load_if_exists=load_if_exists, pruner=pruner)
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
 
 
@@ -149,7 +159,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-trials", type=int, default=10, help="The number of trials to run.")
     parser.add_argument("--load-if-exists", action="store_true", help="Load the study if it exists.")
     parser.add_argument("--storage", type=str, default="sqlite:///market_parameter_tuning.db", help="The storage URL for the Optuna study.")
-    parser.add_argument("--no-storage", action="store_false", default=False, help="Do not store the Optuna study.")
+    parser.add_argument("--no-storage", action="store_true", default=False, help="Do not store the Optuna study.")
     parser.add_argument("--n-jobs", type=int, default=1, help="Number of threads to use in the Optuna study. "
                         "WARNING: This may be slow due to Python's GIL lock. Consider using process-based parallelism instead!")
 

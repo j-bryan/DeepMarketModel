@@ -26,7 +26,8 @@ class SupervisedTrainer:
               verbose: bool = False,
               save_best: bool = False,
               save_path: str | None = None,
-              save_every: int | None = None):
+              save_every: int | None = None,
+              optuna_trial=None):
         """
         Train the model on the training data. If test_loader is provided, evaluate the model on the
         test data after each epoch.
@@ -39,7 +40,14 @@ class SupervisedTrainer:
         :param save_best: bool: Whether to save the best model
         :param save_path: str: The path to save the model
         :param save_every: int: Save the model every n epochs
+        :param optuna_trial: optuna.Trial: The Optuna trial object. Used for reporting intermediate
+                             results to Optuna. Must also provide test_loader to use this feature.
         """
+        if optuna_trial is not None and test_loader is None:
+            raise ValueError("Must provide test_loader if using Optuna trial.")
+        elif optuna_trial is not None:
+            import optuna  # lazy import because not everyone will be using Optuna
+
         self.teacher_forcing = teacher_forcing
         self.teacher_forcing_ratio = teacher_forcing_ratio
 
@@ -70,6 +78,11 @@ class SupervisedTrainer:
                 test_losses[epoch] = test_loss
             else:
                 test_loss = None
+
+            if optuna_trial is not None:
+                optuna_trial.report(test_loss, step=epoch)
+                if optuna_trial.should_prune():
+                    raise optuna.TrialPruned()
 
             if verbose:
                 msg = f"{epoch+1:<10}{train_loss:<15.5f}"
