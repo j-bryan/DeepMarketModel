@@ -144,7 +144,7 @@ def get_dataloaders(iso: str,
     :param kwargs: dict: Additional parameters handled (test_size, shuffle, random_state, batch_size)
     """
     # Fetch the data from file
-    data = pd.read_csv(f"data/{iso.upper()}/{iso}.csv", index_col=0)
+    data = pd.read_csv(f"data/{iso.upper()}/{iso.lower()}.csv", index_col=0)
     y = data.pop("PRICE").to_numpy()
     X = data.to_numpy()
 
