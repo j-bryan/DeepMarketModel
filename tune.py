@@ -90,7 +90,7 @@ def tune_model(**kwargs):
     batch_size = kwargs["batch_size"]
     segment_length = kwargs["segment_length"]
     storage = kwargs["storage"]
-    no_storage = kwargs["storage"]
+    no_storage = kwargs["no_storage"]
     n_jobs = kwargs["n_jobs"]
 
     if "%ISO%" in study_name:
@@ -148,8 +148,8 @@ if __name__ == "__main__":
     parser.add_argument("--study-name", type=str, default="%ISO%", help="The name of the Optuna study. If not provided, the ISO name will be used.")
     parser.add_argument("--n-trials", type=int, default=10, help="The number of trials to run.")
     parser.add_argument("--load-if-exists", action="store_true", help="Load the study if it exists.")
-    parser.add_argument("--storage", type=str, default="sqlite:////market_parameter_tuning.db", help="The storage URL for the Optuna study.")
-    parser.add_argument("--no-storage", action="store_true", help="Do not store the Optuna study.")
+    parser.add_argument("--storage", type=str, default="sqlite:///market_parameter_tuning.db", help="The storage URL for the Optuna study.")
+    parser.add_argument("--no-storage", action="store_false", default=False, help="Do not store the Optuna study.")
     parser.add_argument("--n-jobs", type=int, default=1, help="Number of threads to use in the Optuna study. "
                         "WARNING: This may be slow due to Python's GIL lock. Consider using process-based parallelism instead!")
 
