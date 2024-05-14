@@ -1,4 +1,3 @@
-import optuna
 import torch
 
 
@@ -123,6 +122,112 @@ class SequenceDecoder(SequenceModel):
         return decoder_outputs, decoder_hidden
 
 
+class ConditionalHiddenDecoder(SequenceDecoder):
+    """
+    Decodes a sequence with a vector of conditional inputs that are appended to the hidden state
+    at the first time step.
+    """
+    def __init__(self,
+                 layer_type: str,
+                 input_size: int,
+                 hidden_size: int,
+                 num_layers: int,
+                 batch_first: bool,
+                 dropout: bool,
+                 bidirectional: bool,
+                 conditional_size: int):
+        super().__init__(layer_type, input_size, hidden_size + conditional_size, num_layers, batch_first, dropout, bidirectional)
+
+    def forward(self,
+                encoder_outputs: torch.Tensor,
+                encoder_hidden: torch.Tensor | tuple,
+                condition: torch.Tensor,
+                target_tensor: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+
+        use_teacher_forcing = target_tensor is not None
+        if use_teacher_forcing and not self.feed_previous:
+            raise ValueError("The feed_previous parameter must be True if a target tensor is provided.")
+
+        # Initialize the decoder hidden state with the encoder hidden state
+        batch_size = encoder_outputs.size(0)
+
+        decoder_input = torch.zeros(batch_size, 1, 1).to(encoder_outputs.device)  # No outputs available at the first step, so use a zero tensor
+        decoder_hidden = encoder_hidden
+
+        # Loop over the sequence length to retrieve the decoder outputs at each time step
+        decoder_outputs = []
+        seq_len = encoder_outputs.size(1)
+        for i in range(seq_len):
+            output, decoder_hidden = self.model(decoder_input, decoder_hidden)
+            output = self.output_model(output)
+            decoder_outputs.append(output)
+
+            # We allow for three different modes of operation for the decoder:
+            #   1. (Teacher forcing) Use the target tensor as input to the decoder. This is useful during
+            #      training to help the model learn to generate the correct output.
+            #   2. (Feed previous) Use the previous output of the decoder as input to the next step. This
+            #      is useful during inference when the target tensor is not available.
+            #   3. (No feedback) Use a zero tensor as input to the decoder. This is a simple baseline.
+            if use_teacher_forcing:
+                decoder_input = target_tensor[:, i, :].unsqueeze(1)
+            elif self.feed_previous:
+                decoder_input = output
+            else:
+                decoder_input = torch.zeros(batch_size, 1, 1)
+
+        decoder_outputs = torch.cat(decoder_outputs, dim=1)
+        return decoder_outputs, decoder_hidden
+
+
+class ConditionalInputDecoder(SequenceDecoder):
+    """
+    Decodes a sequence using a vector of conditional inputs at each time step in addition to the
+    output of the previous time step.
+    """
+    def __init__(self, layer_type: str, input_size: int, hidden_size: int, num_layers: int, batch_first: bool, dropout: float, bidirectional: bool, conditional_size: int):
+        super().__init__(layer_type, input_size + conditional_size, hidden_size, num_layers, batch_first, dropout, bidirectional)
+
+    def forward(self,
+                encoder_outputs: torch.Tensor,
+                encoder_hidden: torch.Tensor | tuple,
+                condition: torch.Tensor,
+                target_tensor: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        # TODOs
+        use_teacher_forcing = target_tensor is not None
+        if use_teacher_forcing and not self.feed_previous:
+            raise ValueError("The feed_previous parameter must be True if a target tensor is provided.")
+
+        # Initialize the decoder hidden state with the encoder hidden state
+        batch_size = encoder_outputs.size(0)
+
+        decoder_input = torch.zeros(batch_size, 1, 1).to(encoder_outputs.device)  # No outputs available at the first step, so use a zero tensor
+        decoder_hidden = encoder_hidden
+
+        # Loop over the sequence length to retrieve the decoder outputs at each time step
+        decoder_outputs = []
+        seq_len = encoder_outputs.size(1)
+        for i in range(seq_len):
+            output, decoder_hidden = self.model(decoder_input, decoder_hidden)
+            output = self.output_model(output)
+            decoder_outputs.append(output)
+
+            # We allow for three different modes of operation for the decoder:
+            #   1. (Teacher forcing) Use the target tensor as input to the decoder. This is useful during
+            #      training to help the model learn to generate the correct output.
+            #   2. (Feed previous) Use the previous output of the decoder as input to the next step. This
+            #      is useful during inference when the target tensor is not available.
+            #   3. (No feedback) Use a zero tensor as input to the decoder. This is a simple baseline.
+            if use_teacher_forcing:
+                decoder_input = target_tensor[:, i, :].unsqueeze(1)
+            elif self.feed_previous:
+                decoder_input = output
+            else:
+                decoder_input = torch.zeros(batch_size, 1, 1)
+
+        decoder_outputs = torch.cat(decoder_outputs, dim=1)
+        return decoder_outputs, decoder_hidden
+
+
 class Seq2Seq(torch.nn.Module):
     """
     An encoder-decoder sequence-to-sequence model.
@@ -135,6 +240,23 @@ class Seq2Seq(torch.nn.Module):
     def forward(self, X: torch.Tensor, target_tensor: torch.Tensor | None = None) -> torch.Tensor:
         encoded, hidden = self.encoder(X)  # For LSTM, hidden is a tuple of hidden and cell state
         decoded, _ = self.decoder(encoded, hidden, target_tensor)  # Ignore the second output, which is the hidden state (and cell state if LSTM)
+        return decoded
+
+
+class ConditionalSeq2Seq(torch.nn.Module):
+    """
+    Sequence-to-sequence encoder-decoder model with an additional conditional input that is added
+    to the hidden state transfer between the encoder and decoder.
+    """
+    def __init__(self, encoder: SequenceEncoder, decoder: SequenceDecoder):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def forward(self, X: torch.Tensor, condition: torch.Tensor, target_tensor: torch.Tensor | None = None) -> torch.Tensor:
+        encoded, hidden = self.encoder(X)
+        hidden = self.add_condition(hidden, condition)
+        decoded, _ = self.decoder(encoded, hidden, target_tensor)
         return decoded
 
 
