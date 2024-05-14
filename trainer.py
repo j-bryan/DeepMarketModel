@@ -88,13 +88,11 @@ class SupervisedTrainer:
                 msg = f"{epoch+1:<10}{train_loss:<15.5f}"
                 if test_loss is not None:
                     msg += f"{test_loss:<15.5f}"
-                tqdm.write(msg)
+                # tqdm.write(msg)
 
             if test_loader is not None and test_loss < best_loss:
                 best_loss = test_loss
                 if save_best:
-                    if verbose:
-                        tqdm.write(f"New best loss: {test_loss}.")
                     # Don't actually save the model yet, because that is slow. Also, we'd be
                     # having to save it almost every epoch at the start of training.
                     best_model_state = self.model.state_dict()

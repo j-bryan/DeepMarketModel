@@ -1,10 +1,11 @@
+import os
 import numpy as np
 import pandas as pd
 
 from sklearn.base import TransformerMixin
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import RobustScaler, FunctionTransformer, QuantileTransformer
+from sklearn.preprocessing import RobustScaler, FunctionTransformer, QuantileTransformer, MinMaxScaler
 from sklearn.compose import ColumnTransformer
 
 
@@ -114,18 +115,44 @@ class BatchedTransformer:
         return X_transformed
 
     def inverse_transform(self, Xt: torch.Tensor) -> torch.Tensor:
+        to_tensor = isinstance(Xt, torch.Tensor)
         self._validate_input(Xt)
         dim1 = Xt.shape[0]
 
         Xt_np = self._to_flat_np(Xt)
         Xt_transformed = self.transformer.inverse_transform(Xt_np)
-        Xt_transformed = self._to_batched(Xt_transformed, dim1, isinstance(Xt, torch.Tensor))
+        Xt_transformed = self._to_batched(Xt_transformed, dim1, to_tensor)
 
         return Xt_transformed
 
     def fit_transform(self, X: torch.Tensor) -> torch.Tensor:
         self.fit(X)
         return self.transform(X)
+
+
+def approx_capacities(iso: str) -> np.ndarray:
+    """
+    Approximates the effective capacities of the generators in the ISO. We assume that the effective
+    capacities are equivalent to the maximum generator output in the ISO within some time period.
+    We'll use monthly maximums, cast to hourly values.
+    """
+    # NOTE CAISO data isn't available all the way back to 2022-01-01! We'll need to adjust the start
+    # date of the other data to match.
+    possible_files = [f"data/{iso.upper()}/{iso.lower()}_generation.csv", f"data/{iso.upper()}/fuelmix.csv"]
+    for file in possible_files:
+        if not os.path.exists(file):
+            continue
+        data = pd.read_csv(file, index_col=0)
+        break
+    else:
+        raise FileNotFoundError(f"No valid data file found for {iso}!")
+    dates = pd.date_range(end=f"2022-12-31 23:00", periods=len(data), freq='h')
+    data.index = dates
+    monthly_maxima = []
+    for (month, year), df in data.groupby([data.index.month, data.index.year]):
+        max_gen = df.max(axis=0)
+        monthly_maxima.append(np.tile(max_gen.to_numpy(), (len(df), 1)))
+    return np.vstack(monthly_maxima)
 
 
 def get_dataloaders(iso: str,
@@ -147,6 +174,13 @@ def get_dataloaders(iso: str,
     data = pd.read_csv(f"data/{iso.upper()}/{iso.lower()}.csv", index_col=0)
     y = data.pop("PRICE").to_numpy()
     X = data.to_numpy()
+
+    if kwargs.pop("include_capacities", False):
+        capacities = approx_capacities(iso)
+        if len(capacities) != len(X):
+            print(f"Length of capacities does not match length of data for {iso}! ({len(capacities)} vs {len(X)})")
+        X = np.hstack((X[-len(capacities):], capacities))
+        y = y[-len(capacities):]
 
     # If segment_length is not None, segment the data
     if segment_length is not None:
@@ -198,7 +232,26 @@ def load_data(iso: str, batch_size: int = 64, segment_length: int = 24, **kwargs
     # MISO data regressors loaded as [TOTALLOAD, NGPRICE, WIND, SOLAR]
     # We want to scale TOTALLOAD and NGPRICE to be centered around 0 and scaled by the IQR (robust scaling).
     # WIND and SOLAR are already between 0 and 1, so we won't do any additional scaling.
-    xtrans = InvertibleColumnTransformer([('robust_scaler', RobustScaler(), [0, 1])], remainder='passthrough')
+
+    # We may also be including the effective capacities of the generators in the ISO, which will be
+    # a number between 0 and 1, but we don't know how many generator types there are yet. Our hacky
+    # way to deal with this is going to be to read the first line of the data file and count the number
+    # of commas.
+    transformers = [('robust_scaler', RobustScaler(), [0, 1])]
+    if kwargs.get("include_capacities", False):
+        possible_files = [f"data/{iso.upper()}/{iso.lower()}_generation.csv", f"data/{iso.upper()}/fuelmix.csv"]
+        for file in possible_files:
+            if not os.path.exists(file):
+                continue
+            with open(f"data/{iso.upper()}/fuelmix.csv") as f:
+                first_line = f.readline()
+                n_generators = first_line.count(",")
+            break  # if we've found a valid file, use just that one and break
+        n_vre = 1 if iso.lower() == "miso" else 2
+        cap_cols = list(range(2 + n_vre, 2 + n_vre + n_generators))
+        transformers.append(('minmax_scaler', MinMaxScaler(), cap_cols))
+    xtrans = InvertibleColumnTransformer(transformers, remainder='passthrough')
+
     # For the electricity price, we want first center and scale the data using robust scaling, then
     # apply an arcsinh transformation to squash the peaks of the data. Since the arcsinh function is
     # approximately linear around 0, this will effect the data near the median much less than the data

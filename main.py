@@ -14,7 +14,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error
 from metrics import *
 
-from gru import EncoderGRU, DecoderGRU, EncoderDecoderGRU
+# from gru import EncoderGRU, DecoderGRU, EncoderDecoderGRU
 from dataloader import get_dataloaders
 
 
@@ -155,13 +155,13 @@ def load_data(batch_size: int = 64, segment_length: int = 24, **kwargs):
     return train_loader, test_loader, xtrans, ytrans
 
 
-def plot_full_time_series(model, xtrans, ytrans, segment_length, save_path):
+def plot_full_time_series(model, iso_name, xtrans, ytrans, segment_length, save_path):
     # Plot predictions for the original time series data.
     # We need to load the original data again (it was shuffled by the data loader), and then predict
     # on that data.
-    data = pd.read_csv("data/MISO/miso.csv", index_col=0)
-    X = data[["TOTALLOAD", "NGPRICE", "WIND"]].to_numpy()
-    y_true = data["PRICE"].to_numpy()
+    data = pd.read_csv(f"data/{iso_name.upper()}/{iso_name.lower()}.csv", index_col=0)
+    y_true = data.pop("PRICE").to_numpy()
+    X = data.to_numpy()
 
     Xtrans = xtrans.transform(X)
     n_segments = len(X) // segment_length
@@ -169,38 +169,64 @@ def plot_full_time_series(model, xtrans, ytrans, segment_length, save_path):
     Xtrans = torch.tensor(Xtrans).float()
 
     y_pred = model.forward(Xtrans)
-    y_pred = y_pred.squeeze().detach().numpy().ravel()
-    y_pred = ytrans.inverse_transform(y_pred.reshape(-1, 1)).ravel()
+    y_pred = ytrans.inverse_transform(y_pred).ravel()
 
     df_timeseries = pd.DataFrame({'Actual': y_true, 'Predicted': y_pred})
-    df_timeseries.index = pd.date_range(start='2018-01-01', periods=len(df_timeseries), freq='H')
+    df_timeseries.index = pd.date_range(start='2018-01-01', periods=len(df_timeseries), freq='h')
     fig = px.line(df_timeseries)
     fig.update_layout(xaxis_title="", yaxis_title="Price ($/MWh)")
     fig.write_image(save_path)
 
 
+def get_full_time_series_predictions(model, iso_name, xtrans, ytrans, segment_length):
+    # Plot predictions for the original time series data.
+    # We need to load the original data again (it was shuffled by the data loader), and then predict
+    # on that data.
+    data = pd.read_csv(f"data/{iso_name.upper()}/{iso_name.lower()}.csv", index_col=0)
+    y_true = data.pop("PRICE").to_numpy()
+    X = data.to_numpy()
+
+    Xtrans = xtrans.transform(X)
+    n_segments = len(X) // segment_length
+    Xtrans = Xtrans[:segment_length * n_segments].reshape(n_segments, segment_length, -1)
+    Xtrans = torch.tensor(Xtrans).float()
+
+    y_pred = model.forward(Xtrans)
+    y_pred = ytrans.inverse_transform(y_pred).ravel()
+
+    return y_true, y_pred
+
+
 def plot_train_test_predictions(model, train_loader, test_loader, ytrans, dirname):
     # Plot the predictions of the full training set
-    train_predictions = model.forward(train_loader.dataset.tensors[0]).detach().numpy()
-    train_predictions = np.vstack(train_predictions)
+    # train_predictions = model.forward(train_loader.dataset.tensors[0]).detach().numpy()
+    # train_predictions = np.vstack(train_predictions)
+    # train_predictions = ytrans.inverse_transform(train_predictions)
+    train_predictions = model.forward(train_loader.dataset.tensors[0])
     train_predictions = ytrans.inverse_transform(train_predictions)
-    train_actuals = np.vstack(train_loader.dataset.tensors[1].detach().numpy())
-    train_actuals = ytrans.inverse_transform(train_actuals)
+    train_predictions = np.vstack(train_predictions.detach().numpy())
+    # train_actuals = np.vstack(train_loader.dataset.tensors[1].detach().numpy())
+    # train_actuals = ytrans.inverse_transform(train_actuals)
+    train_actuals = ytrans.inverse_transform(train_loader.dataset.tensors[1])
     train_df = pd.DataFrame({'Actual': train_actuals.ravel(), 'Predicted': train_predictions.ravel()})
     fig = px.line(train_df, title="Training Set Predictions")
     fig.update_layout(xaxis_title="Time", yaxis_title="Price")
-    fig.write_image(os.path.join(dirname, 'train_predictions.png'))
+    fig.write_image(os.path.join(dirname, 'train_predictions_caps.png'))
 
     # Plot the predictions of the full testing set
-    test_predictions = model.forward(test_loader.dataset.tensors[0]).detach().numpy()
-    test_predictions = np.vstack(test_predictions)
+    # test_predictions = model.forward(test_loader.dataset.tensors[0]).detach().numpy()
+    # test_predictions = np.vstack(test_predictions)
+    # test_predictions = ytrans.inverse_transform(test_predictions)
+    test_predictions = model.forward(test_loader.dataset.tensors[0])
     test_predictions = ytrans.inverse_transform(test_predictions)
-    test_actuals = np.vstack(test_loader.dataset.tensors[1].detach().numpy())
-    test_actuals = ytrans.inverse_transform(test_actuals)
+    test_predictions = np.vstack(test_predictions.detach().numpy())
+    # test_actuals = np.vstack(test_loader.dataset.tensors[1].detach().numpy())
+    # test_actuals = ytrans.inverse_transform(test_actuals)
+    test_actuals = ytrans.inverse_transform(test_loader.dataset.tensors[1])
     test_df = pd.DataFrame({'Actual': test_actuals.ravel(), 'Predicted': test_predictions.ravel()})
     fig = px.line(test_df, title="Testing Set Predictions")
     fig.update_layout(xaxis_title="Time", yaxis_title="Price")
-    fig.write_image(os.path.join(dirname, 'test_predictions.png'))
+    fig.write_image(os.path.join(dirname, 'test_predictions_caps.png'))
 
 
 def plot_losses(train_losses, test_losses, save_path, loss_name=None):
@@ -217,16 +243,28 @@ def plot_losses(train_losses, test_losses, save_path, loss_name=None):
 
 def calculate_metrics(model, train_loader, test_loader, ytrans, save_path):
     # Run model on full train and test sets to get the predicted values for each
-    train_predictions = model.forward(train_loader.dataset.tensors[0]).detach().numpy()
-    train_predictions = np.vstack(train_predictions)
-    train_predictions = ytrans.inverse_transform(train_predictions)
-    train_actuals = np.vstack(train_loader.dataset.tensors[1].detach().numpy())
-    train_actuals = ytrans.inverse_transform(train_actuals)
-    test_predictions = model.forward(test_loader.dataset.tensors[0]).detach().numpy()
-    test_predictions = np.vstack(test_predictions)
-    test_predictions = ytrans.inverse_transform(test_predictions)
-    test_actuals = np.vstack(test_loader.dataset.tensors[1].detach().numpy())
-    test_actuals = ytrans.inverse_transform(test_actuals)
+    # train_predictions = model.forward(train_loader.dataset.tensors[0]).detach().numpy()
+    # train_predictions = np.vstack(train_predictions)
+    # train_predictions = ytrans.inverse_transform(train_predictions)
+    train_predictions = model.forward(train_loader.dataset.tensors[0])
+    train_predictions = ytrans.inverse_transform(train_predictions).detach().numpy().ravel()
+    # train_actuals = np.vstack(train_loader.dataset.tensors[1].detach().numpy())
+    # train_actuals = ytrans.inverse_transform(train_actuals)
+    train_actuals = ytrans.inverse_transform(train_loader.dataset.tensors[1]).detach().numpy().ravel()
+    # test_predictions = model.forward(test_loader.dataset.tensors[0]).detach().numpy()
+    # test_predictions = np.vstack(test_predictions)
+    # test_predictions = ytrans.inverse_transform(test_predictions)
+    test_predictions = model.forward(test_loader.dataset.tensors[0])
+    test_predictions = ytrans.inverse_transform(test_predictions).detach().numpy()
+    test_predictions = np.vstack(test_predictions).ravel()
+    # test_actuals = np.vstack(test_loader.dataset.tensors[1].detach().numpy())
+    # test_actuals = ytrans.inverse_transform(test_actuals)
+    test_actuals = ytrans.inverse_transform(test_loader.dataset.tensors[1]).detach().numpy().ravel()
+
+    print("train_predictions", train_predictions.shape)
+    print("train_actuals", train_actuals.shape)
+    print("test_predictions", test_predictions.shape)
+    print("test_actuals", test_actuals.shape)
 
     # Calculate metrics for the training and testing sets
     metrics = {}

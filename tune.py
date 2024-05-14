@@ -23,10 +23,11 @@ def define_model(trial: optuna.Trial, n_input_vars: int, n_target_vars: int) -> 
     batch_first = True
 
     # Tuned hyperparameters parameters
-    layer_type = trial.suggest_categorical("recurrent_layer", ["LSTM", "RNN", "GRU"])
+    # layer_type = trial.suggest_categorical("recurrent_layer", ["LSTM", "RNN", "GRU"])
+    layer_type = "GRU"
 
     # Common model parameters
-    hidden_sizes = [2 ** i for i in range(3, 9)]
+    hidden_sizes = [2 ** i for i in range(3, 12)]
     hidden_size = trial.suggest_categorical("hidden_size", hidden_sizes)
     num_layers = trial.suggest_int("e_num_layers", 1, 3)
     bidirectional = trial.suggest_categorical("bidirectional", [True, False])
@@ -104,7 +105,7 @@ def tune_model(**kwargs):
         storage = None
 
     # Load data. We extract the dimensionality of the input and target variables from the data loader.
-    train_loader, test_loader, xtrans, ytrans = load_data(iso, batch_size, segment_length)
+    train_loader, test_loader, xtrans, ytrans = load_data(iso, batch_size, segment_length, include_capacities=True)
     n_input_vars = next(iter(train_loader))[0].shape[-1]
     n_target_vars = next(iter(train_loader))[1].shape[-1]
 
@@ -131,7 +132,8 @@ def tune_model(**kwargs):
                                     test_loader=test_loader,
                                     n_epochs=epochs,
                                     optuna_trial=trial)
-            test_rmse = trainer.evaluate(test_loader, ytrans) ** 0.5
+            # test_rmse = trainer.evaluate(test_loader, ytrans) ** 0.5
+            test_rmse = results.best_test_loss ** 0.5
         except ValueError:  # Catch things like NaN and inf problems so the whole study doesn't crash
             test_rmse = 1e6
 
