@@ -6,7 +6,7 @@ import json
 import optuna
 import torch
 
-from models import SequenceEncoder, SequenceDecoder, Seq2Seq, MLP
+from models import SequenceEncoder, SequenceDecoder, Seq2Seq, ContextHiddenDecoder, ContextInputDecoder, ContextSeq2Seq
 from trainer import SupervisedTrainer
 from dataloader import load_data
 

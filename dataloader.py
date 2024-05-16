@@ -171,7 +171,7 @@ def get_dataloaders(iso: str,
     :param kwargs: dict: Additional parameters handled (test_size, shuffle, random_state, batch_size)
     """
     # Fetch the data from file
-    data = pd.read_csv(f"data/{iso.upper()}/{iso.lower()}.csv", index_col=0)
+    data = pd.read_csv(f"data/{iso.upper()}/{iso.lower()}_raw.csv", index_col=0).interpolate()
     y = data.pop("PRICE").to_numpy()
     X = data.to_numpy()
 
@@ -228,6 +228,20 @@ def get_dataloaders(iso: str,
     return tuple(return_vals)
 
 
+def get_num_context_vars(iso: str) -> int:
+    possible_files = [f"data/{iso.upper()}/{iso.lower()}_generation.csv", f"data/{iso.upper()}/fuelmix.csv"]
+    for file in possible_files:
+        if not os.path.exists(file):
+            continue
+        with open(file, "r") as f:
+            first_line = f.readline()
+            n_generators = first_line.count(",")
+        break  # if we've found a valid file, use just that one and break
+    else:
+        raise FileNotFoundError(f"No valid data file found for {iso}!")
+    return n_generators
+
+
 def load_data(iso: str, batch_size: int = 64, segment_length: int = 24, **kwargs):
     # MISO data regressors loaded as [TOTALLOAD, NGPRICE, WIND, SOLAR]
     # We want to scale TOTALLOAD and NGPRICE to be centered around 0 and scaled by the IQR (robust scaling).
@@ -237,16 +251,11 @@ def load_data(iso: str, batch_size: int = 64, segment_length: int = 24, **kwargs
     # a number between 0 and 1, but we don't know how many generator types there are yet. Our hacky
     # way to deal with this is going to be to read the first line of the data file and count the number
     # of commas.
-    transformers = [('robust_scaler', RobustScaler(), [0, 1])]
+    transformers = [('robust_scaler', RobustScaler(), [0, 1]),
+                    ('minmax_vre', MinMaxScaler(), [2] if iso.lower() == "miso" else [2, 3])]  # TODO remove if not using raw data
+    # transformers = [('robust_scaler', RobustScaler(), [0, 1])]
     if kwargs.get("include_capacities", False):
-        possible_files = [f"data/{iso.upper()}/{iso.lower()}_generation.csv", f"data/{iso.upper()}/fuelmix.csv"]
-        for file in possible_files:
-            if not os.path.exists(file):
-                continue
-            with open(f"data/{iso.upper()}/fuelmix.csv") as f:
-                first_line = f.readline()
-                n_generators = first_line.count(",")
-            break  # if we've found a valid file, use just that one and break
+        n_generators = get_num_context_vars(iso)
         n_vre = 1 if iso.lower() == "miso" else 2
         cap_cols = list(range(2 + n_vre, 2 + n_vre + n_generators))
         transformers.append(('minmax_scaler', MinMaxScaler(), cap_cols))
