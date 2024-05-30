@@ -42,7 +42,8 @@ def segment_array(x, segment_length):
 
 def main(
     n_trials: int = 100,
-    epochs: int = 100
+    epochs: int = 100,
+    no_save: bool = False
 ):
     X, y, context = load_data("ERCOT")
     X = segment_array(X, segment_length=24)
@@ -117,8 +118,8 @@ def main(
 
         return test_mape
 
-    storage = f"sqlite:///optuna.db"
-    study = optuna.create_study(direction="minimize", study_name="ercot_skorch", storage=storage)
+    storage = f"sqlite:///optuna.db" if not no_save else None
+    study = optuna.create_study(direction="minimize", study_name="ercot_skorch", storage=storage, load_if_exists=True)
     study.optimize(objective, n_trials=n_trials)
 
 
