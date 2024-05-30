@@ -5,13 +5,14 @@ import json
 
 import optuna
 import torch
+import fire
 
-from models import SequenceEncoder, SequenceDecoder, Seq2Seq, ContextHiddenDecoder, ContextInputDecoder, ContextSeq2Seq
+from models import SequenceEncoder, SequenceDecoder, ContextHiddenDecoder, ContextInputDecoder, ContextSeq2Seq
 from trainer import SupervisedTrainer
-from dataloader import load_data
+from dataloader import load_data, get_num_context_vars
 
 
-def define_model(trial: optuna.Trial, n_input_vars: int, n_target_vars: int) -> torch.nn.Module:
+def define_model(trial: optuna.Trial, n_input_vars: int, n_target_vars: int, n_context_vars: int) -> torch.nn.Module:
     """
     Defines a time series deep learning model based on LSTM, RNN, or GRU with hyperparameters tuned
     by Optuna.
@@ -23,102 +24,122 @@ def define_model(trial: optuna.Trial, n_input_vars: int, n_target_vars: int) -> 
     batch_first = True
 
     # Tuned hyperparameters parameters
-    # layer_type = trial.suggest_categorical("recurrent_layer", ["LSTM", "RNN", "GRU"])
     layer_type = "GRU"
 
     # Common model parameters
-    hidden_sizes = [2 ** i for i in range(3, 12)]
-    hidden_size = trial.suggest_categorical("hidden_size", hidden_sizes)
-    num_layers = trial.suggest_int("e_num_layers", 1, 3)
+    hidden_size = trial.suggest_int("hidden_size", 32, 256)
+    num_layers = trial.suggest_int("num_layers", 1, 3)
     bidirectional = trial.suggest_categorical("bidirectional", [True, False])
-    teacher_forcing = trial.suggest_categorical("teacher_forcing", [True, False])
 
     # Encoder parameters
-    if num_layers > 1:
-        e_dropout = trial.suggest_float("dropout", 0.0, 0.3)
-    else:
-        e_dropout = 0.0
+    # e_dropout = trial.suggest_float("e_dropout", 0.0, 0.3)
+    e_dropout = 0.0
 
     # Decoder parameters
-    if teacher_forcing:
-        d_feed_previous = True
-    else:
-        d_feed_previous = trial.suggest_categorical("d_feed_previous", [True, False])
-
-    if num_layers > 1:
-        d_dropout = trial.suggest_float("d_dropout", 0.0, 0.3)
-    else:
-        d_dropout = 0.0
+    d_feed_previous = True
+    # d_dropout = trial.suggest_float("d_dropout", 0.0, 0.3)
+    d_dropout = 0.0
 
     # Define encoder model
+    encoder_context = "none"
+    n_encoder_input_vars = n_input_vars + n_context_vars * (encoder_context == "input")
     encoder = SequenceEncoder(layer_type=layer_type,
-                              input_size=n_input_vars,
-                              hidden_size=hidden_size,
-                              num_layers=num_layers,
-                              batch_first=batch_first,
-                              dropout=e_dropout,
-                              bidirectional=bidirectional)
+                            input_size=n_encoder_input_vars,
+                            hidden_size=hidden_size,
+                            num_layers=num_layers,
+                            batch_first=batch_first,
+                            dropout=e_dropout,
+                            bidirectional=bidirectional)
 
     # Define decoder readout model
     num_directions = 2 if bidirectional else 1
-    output_model = torch.nn.Linear(hidden_size * num_directions, n_target_vars)
 
     # Define decoder model
-    decoder = SequenceDecoder(layer_type=layer_type,
-                              input_size=n_target_vars,
-                              hidden_size=hidden_size,
-                              num_layers=num_layers,
-                              batch_first=batch_first,
-                              dropout=d_dropout,
-                              bidirectional=bidirectional,
-                              output_model=output_model,
-                              feed_previous=d_feed_previous)
+    decoder_context = trial.suggest_categorical("decoder_context", ["hidden", "input", "none"])
+    if decoder_context == "hidden":
+        output_model = torch.nn.Linear((hidden_size + n_context_vars) * num_directions, n_target_vars)
+        decoder = ContextHiddenDecoder(layer_type=layer_type,
+                                    input_size=n_target_vars,
+                                    hidden_size=hidden_size,
+                                    num_layers=num_layers,
+                                    conditional_size=n_context_vars,
+                                    batch_first=batch_first,
+                                    dropout=d_dropout,
+                                    bidirectional=bidirectional,
+                                    output_model=output_model,
+                                    feed_previous=d_feed_previous)
+    elif decoder_context == "input":
+        output_model = torch.nn.Linear(hidden_size * num_directions, n_target_vars)
+        decoder = ContextInputDecoder(layer_type=layer_type,
+                                   input_size=n_target_vars,
+                                   hidden_size=hidden_size,
+                                   num_layers=num_layers,
+                                   conditional_size=n_context_vars,
+                                   batch_first=batch_first,
+                                   dropout=d_dropout,
+                                   bidirectional=bidirectional,
+                                   output_model=output_model,
+                                   feed_previous=d_feed_previous)
+    else:
+        output_model = torch.nn.Linear(hidden_size * num_directions, n_target_vars)
+        decoder = SequenceDecoder(layer_type=layer_type,
+                                  input_size=n_target_vars,
+                                  hidden_size=hidden_size,
+                                  num_layers=num_layers,
+                                  batch_first=batch_first,
+                                  dropout=d_dropout,
+                                  bidirectional=bidirectional,
+                                  output_model=output_model,
+                                  feed_previous=d_feed_previous)
 
-    model = Seq2Seq(encoder, decoder)
+    model = ContextSeq2Seq(encoder, decoder, encoder_context != "none", decoder_context != "none", n_context_vars)
+
     return model
 
 
-def tune_model(**kwargs):
+def tune_model(
+        iso: str = "ERCOT",
+        study_name: str = "%ISO%",  # Default to the ISO name
+        n_trials: int = 10,  # Number of optuna trials
+        load_if_exists: bool = False,  # Load the study if it exists
+        storage: str = "sqlite:///market_parameter_tuning.db",  # Storage URL for the Optuna study
+        no_storage: bool = False,  # Do not store the Optuna study
+        n_jobs: int = 1,  # Number of threads to use in the Optuna study. Recommend using process-based parallelism instead for CPU-bound tasks.
+        batch_size: int = 64,  # Batch size for the data loader
+        segment_length: int = 24,  # Segment length for the data loader
+        epochs: int = 30,  # Number of epochs to train each model
+        device: str = "cuda",  # Device to run the model on
+    ):
     """"
     Tunes the hyperparameters of a deep learning model using Optuna. At the moment, there are 10
     parameters to tune: 8 model hyperparameters and 2 optimizer hyperparameters.
     """
-    # Parse kwargs
-    iso = kwargs["iso"]
-    device = kwargs["device"]
-    epochs = kwargs["epochs"]
-    study_name = kwargs["study_name"]
-    load_if_exists = kwargs["load_if_exists"]
-    n_trials = kwargs["n_trials"]
-    batch_size = kwargs["batch_size"]
-    segment_length = kwargs["segment_length"]
-    storage = kwargs["storage"]
-    no_storage = kwargs["no_storage"]
-    n_jobs = kwargs["n_jobs"]
-
     if "%ISO%" in study_name:
         study_name = study_name.replace("%ISO%", iso.upper())
 
-    if storage in kwargs and no_storage:
-        raise ValueError("Cannot provide both storage and no_storage arguments.")
     if no_storage:
+        print("No storage specified. Study results will not be saved.")
         storage = None
 
     # Load data. We extract the dimensionality of the input and target variables from the data loader.
     train_loader, test_loader, xtrans, ytrans = load_data(iso, batch_size, segment_length, include_capacities=True)
-    n_input_vars = next(iter(train_loader))[0].shape[-1]
-    n_target_vars = next(iter(train_loader))[1].shape[-1]
+    n_conditional_vars = get_num_context_vars(iso)
+    train_tensor, target_tensor = next(iter(train_loader))
+    n_input_vars = train_tensor.shape[-1] - n_conditional_vars
+    n_target_vars = target_tensor.shape[-1]
 
     # Define the objective function for Optuna. This dynamically defines the model based on parameters
     # suggested by the Optuna trial object. The hyperparameters are optimized using RMSE because RMSE
     # is interpretable (same units as the target variable) and is sensitive to outlier price values,
     # which are important to plant economics.
     def objective(trial: optuna.Trial):
-        model = define_model(trial, n_input_vars, n_target_vars)  # 8 tuned model hyperparameters
+        model = define_model(trial, n_input_vars, n_target_vars, n_conditional_vars)  # 8 tuned model hyperparameters
 
         # 2 tuned optimizer hyperparameters
-        learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-1, log=True)
-        weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-1, log=True)
+        # learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-1, log=True)
+        # weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-1, log=True)
+        learning_rate = 3e-3
+        weight_decay = 1e-5
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
         criterion = torch.nn.MSELoss()
@@ -137,6 +158,8 @@ def tune_model(**kwargs):
         except ValueError:  # Catch things like NaN and inf problems so the whole study doesn't crash
             test_rmse = 1e6
 
+        results.plot_losses()
+
         return test_rmse
 
     pruner = optuna.pruners.HyperbandPruner()
@@ -145,34 +168,4 @@ def tune_model(**kwargs):
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Tune hyperparameters for deep learning models.")
-
-    #========================
-    #   REQUIRED ARGUMENTS
-    #========================
-    parser.add_argument("--iso", type=str, required=True, help="The ISO to tune model")  # required arguments
-
-    #========================
-    #   OPTIONAL ARGUMENTS
-    #========================
-    # Optuna arguments
-    parser.add_argument("--study-name", type=str, default="%ISO%", help="The name of the Optuna study. If not provided, the ISO name will be used.")
-    parser.add_argument("--n-trials", type=int, default=10, help="The number of trials to run.")
-    parser.add_argument("--load-if-exists", action="store_true", help="Load the study if it exists.")
-    parser.add_argument("--storage", type=str, default="sqlite:///market_parameter_tuning.db", help="The storage URL for the Optuna study.")
-    parser.add_argument("--no-storage", action="store_true", default=False, help="Do not store the Optuna study.")
-    parser.add_argument("--n-jobs", type=int, default=1, help="Number of threads to use in the Optuna study. "
-                        "WARNING: This may be slow due to Python's GIL lock. Consider using process-based parallelism instead!")
-
-    # Data arguments
-    parser.add_argument("--batch-size", type=int, default=64, help="The batch size for the data loader.")
-    parser.add_argument("--segment-length", type=int, default=24, help="The segment length for the data loader.")
-
-    # Model training arguments
-    parser.add_argument("--epochs", type=int, default=30, help="The number of epochs to train each model.")
-    parser.add_argument("--device", type=str, default="cpu", help="The device to run the model on.")
-
-    args = vars(parser.parse_args())
-
-    tune_model(**args)
+    fire.Fire(tune_model)

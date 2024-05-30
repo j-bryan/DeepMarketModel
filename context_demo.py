@@ -106,7 +106,7 @@ def main(**kwargs):
     include_capacities = encoder_context != "none" or decoder_context != "none"  # If both are none, we don't need the context variables
 
     # Load data. We extract the dimensionality of the input and target variables from the data loader.
-    train_loader, test_loader, xtrans, ytrans = load_data(iso, batch_size, segment_length, include_capacities=include_capacities)
+    train_loader, test_loader, xtrans, ytrans = load_data(iso, batch_size, segment_length, include_capacities=include_capacities, shuffle=False)
     n_conditional_vars = 0 if not include_capacities else get_num_context_vars(iso)
     n_input_vars = next(iter(train_loader))[0].shape[-1] - n_conditional_vars
     n_target_vars = next(iter(train_loader))[1].shape[-1]
@@ -138,7 +138,7 @@ def main(**kwargs):
     except ValueError:  # Catch things like NaN and inf problems so the whole study doesn't crash
         test_rmse = 1e6
 
-    metrics_name = f"metrics/{iso.upper()}RawOpt_enc{encoder_context.title()}_dec{decoder_context.title()}.json"
+    metrics_name = f"metrics/{iso.upper()}OptNoShuffle_enc{encoder_context.title()}_dec{decoder_context.title()}.json"
     calculate_metrics(model, train_loader, test_loader, ytrans, metrics_name)
 
 

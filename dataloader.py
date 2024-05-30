@@ -130,7 +130,7 @@ class BatchedTransformer:
         return self.transform(X)
 
 
-def approx_capacities(iso: str) -> np.ndarray:
+def get_context_values(iso: str) -> np.ndarray:
     """
     Approximates the effective capacities of the generators in the ISO. We assume that the effective
     capacities are equivalent to the maximum generator output in the ISO within some time period.
@@ -138,20 +138,14 @@ def approx_capacities(iso: str) -> np.ndarray:
     """
     # NOTE CAISO data isn't available all the way back to 2022-01-01! We'll need to adjust the start
     # date of the other data to match.
-    possible_files = [f"data/{iso.upper()}/{iso.lower()}_generation.csv", f"data/{iso.upper()}/fuelmix.csv"]
-    for file in possible_files:
-        if not os.path.exists(file):
-            continue
-        data = pd.read_csv(file, index_col=0)
-        break
-    else:
-        raise FileNotFoundError(f"No valid data file found for {iso}!")
-    dates = pd.date_range(end=f"2022-12-31 23:00", periods=len(data), freq='h')
-    data.index = dates
+    filepath = f"data/{iso.upper()}/monthly_context.csv"
+    data = pd.read_csv(filepath, index_col=0)
+
+    dates = pd.date_range(end=f"2022-12-01", periods=len(data), freq='ME')
     monthly_maxima = []
-    for (month, year), df in data.groupby([data.index.month, data.index.year]):
-        max_gen = df.max(axis=0)
-        monthly_maxima.append(np.tile(max_gen.to_numpy(), (len(df), 1)))
+    for i, date in enumerate(dates):
+        num_hours = date.daysinmonth * 24
+        monthly_maxima.append(np.tile(data.iloc[i].to_numpy(), (num_hours, 1)))
     return np.vstack(monthly_maxima)
 
 
@@ -176,7 +170,7 @@ def get_dataloaders(iso: str,
     X = data.to_numpy()
 
     if kwargs.pop("include_capacities", False):
-        capacities = approx_capacities(iso)
+        capacities = get_context_values(iso)
         if len(capacities) != len(X):
             print(f"Length of capacities does not match length of data for {iso}! ({len(capacities)} vs {len(X)})")
         X = np.hstack((X[-len(capacities):], capacities))
@@ -229,16 +223,10 @@ def get_dataloaders(iso: str,
 
 
 def get_num_context_vars(iso: str) -> int:
-    possible_files = [f"data/{iso.upper()}/{iso.lower()}_generation.csv", f"data/{iso.upper()}/fuelmix.csv"]
-    for file in possible_files:
-        if not os.path.exists(file):
-            continue
-        with open(file, "r") as f:
-            first_line = f.readline()
-            n_generators = first_line.count(",")
-        break  # if we've found a valid file, use just that one and break
-    else:
-        raise FileNotFoundError(f"No valid data file found for {iso}!")
+    filename = f"data/{iso.upper()}/monthly_context.csv"
+    with open(filename, "r") as f:
+        first_line = f.readline()
+        n_generators = first_line.count(",")
     return n_generators
 
 
@@ -251,7 +239,7 @@ def load_data(iso: str, batch_size: int = 64, segment_length: int = 24, **kwargs
     # a number between 0 and 1, but we don't know how many generator types there are yet. Our hacky
     # way to deal with this is going to be to read the first line of the data file and count the number
     # of commas.
-    transformers = [('robust_scaler', RobustScaler(), [0, 1]),
+    transformers = [('robust_scaler', RobustScaler(), [0]),
                     ('minmax_vre', MinMaxScaler(), [2] if iso.lower() == "miso" else [2, 3])]  # TODO remove if not using raw data
     # transformers = [('robust_scaler', RobustScaler(), [0, 1])]
     if kwargs.get("include_capacities", False):
