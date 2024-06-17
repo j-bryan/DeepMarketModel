@@ -29,6 +29,10 @@ class ContextPipeline(BaseEstimator, TransformerMixin):
     def score(self, X, y, context):
         return self.steps[-1][1].score(X, y, context)
 
+    @property
+    def losses(self):
+        return self.steps[-1][1].losses
+
 
 class ContextTransformedTargetRegressor(BaseEstimator, TransformerMixin):
     def __init__(self, regressor, transformer, context_transformer):
@@ -56,6 +60,10 @@ class ContextTransformedTargetRegressor(BaseEstimator, TransformerMixin):
         yt = self.transformer.transform(y)
         return self.regressor.score(X, yt, contextt)
 
+    @property
+    def losses(self):
+        return self.regressor.losses
+
 
 class NeuralNetRegressor(BaseEstimator, TransformerMixin):
     def __init__(self, model, optimizer, criterion, epochs=100, batch_size=32, shuffle=True):
@@ -65,6 +73,7 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
         self.epochs = epochs
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.losses = None
 
     def fit(self, X, y, context, **kwargs):
         device = torch.cuda.is_available() or "cpu"
@@ -80,6 +89,7 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
         if teacher_forcing:
             forcing_ratio = kwargs.get("teacher_forcing_ratio", 0.5)
 
+        losses = torch.zeros(self.epochs, device=device, requires_grad=False)
         bar = tqdm(range(self.epochs))
         for i in bar:
             total_loss = 0
@@ -100,6 +110,9 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
                 total_loss += loss.item()
             total_loss /= len(loader)
             bar.set_postfix({"loss": f"{total_loss:7.4f}"})
+            losses[i] = total_loss
+
+        self.losses = losses
 
         return self
 
@@ -112,10 +125,6 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
         return ypred
 
     def score(self, X, y, context):
-        print("X", X.shape)
-        print("y", y.shape)
-        print("context", context.shape)
         ypred = self.predict(X, context)
-        print("ypred", ypred.shape)
         score = self.criterion(ypred, y)
         return score

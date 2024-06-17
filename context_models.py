@@ -173,7 +173,13 @@ class ContextHiddenDecoder(SequenceDecoder):
         # The context vector is provided with shape (batch_size, context_size), but we need to add
         # a bidirectional * num_layers dimension to match the hidden state shape.
         context = context.unsqueeze(0).repeat(self.num_layers * (2 if self.bidirectional else 1), 1, 1)
-        augmented_hidden = torch.concat([encoder_hidden, context], dim=2)
+        if self.layer_type == "LSTM":
+            encoder_hidden, encoder_cell = encoder_hidden
+            augmented_hidden = torch.concat([encoder_hidden, context], dim=2)
+            augmented_cell   = torch.concat([encoder_cell, context], dim=2)
+            augmented_hidden = (augmented_hidden, augmented_cell)
+        else:
+            augmented_hidden = torch.concat([encoder_hidden, context], dim=2)
         return super().forward(encoder_outputs, augmented_hidden, target_tensor)
 
 
