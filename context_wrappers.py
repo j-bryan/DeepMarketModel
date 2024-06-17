@@ -76,7 +76,7 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
         self.losses = None
 
     def fit(self, X, y, context, **kwargs):
-        device = torch.cuda.is_available() or "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model.to(device)
 
         X = torch.Tensor(X)
