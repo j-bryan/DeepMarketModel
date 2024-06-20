@@ -3,7 +3,7 @@ import pandas as pd
 import fire
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, FunctionTransformer, MinMaxScaler, RobustScaler
+from sklearn.preprocessing import StandardScaler, FunctionTransformer, MinMaxScaler, RobustScaler, Normalizer
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.pipeline import Pipeline
 
@@ -12,6 +12,7 @@ from sklearn.neighbors import KNeighborsRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 
 import optuna
+import torch
 import multiprocessing
 import os
 import pickle
@@ -31,6 +32,7 @@ def load_data(iso: str = "ERCOT"):
     # Context data, saved as monthly values. The time series data is hourly and will be segmented
     # into days, so the context data needs to be repeated for each day in the month.
     monthly_context = pd.read_csv(f"data/{iso.upper()}/monthly_context.csv", index_col=0)
+    monthly_context.pop("NGPRICE")  # Let's try without NGPRICE for now
     context_dates = pd.date_range(end="2022-12-01", periods=monthly_context.shape[0], freq="M")
     context = []
     for i, date in enumerate(context_dates):
@@ -48,18 +50,36 @@ def segment_array(x, segment_length):
     return x.reshape(-1, segment_length, x.shape[1])
 
 
+def within_perc_mape(y_true, y_pred, perc=0.2):
+    mape = np.abs((y_true - y_pred) / y_true)
+    return np.mean(mape < perc)
+
+
 def main(
-    model_type: str,
+    model_type: str = "",
     n_trials: int = 100,
+    eval: bool = False
 ):
+    # Segmenting, splitting, and re-flattening the data should give us the same train/test/validate
+    # split that the context_tune.py script uses but formatted into hours for the baseline models.
     X, y, context = load_data("ERCOT")
     context = np.repeat(context, 24, axis=0)
     X = np.hstack([X, context])
+    X = segment_array(X, 24)
+    y = segment_array(y, 24)
 
     # Train/test/validation split that is 70/20/10
     np.random.seed(42)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, shuffle=True, random_state=42)
     X_test, X_validate, y_test, y_validate = train_test_split(X_test, y_test, test_size=0.333, shuffle=True, random_state=42)
+
+    # Re-flatten the data
+    X_train = X_train.reshape(-1, X_train.shape[2])
+    X_test = X_test.reshape(-1, X_test.shape[2])
+    X_validate = X_validate.reshape(-1, X_validate.shape[2])
+    y_train = y_train.reshape(-1)
+    y_test = y_test.reshape(-1)
+    y_validate = y_validate.reshape(-1)
 
     # Tuning objective for a range of baseline models: LR, KNN, RF, GBT
     # These all have different hyperparameters, so we'll need to tune them separately.
@@ -115,80 +135,97 @@ def main(
         standard_scaler_cols.pop(2)  # Use other scaler for SOLAR
         input_scaler = ColumnTransformer([
             ("load_wind_scaler", StandardScaler(), [0, 1]),
-            ("solar_scaler", MinMaxScaler(), [2])
+            ("solar_scaler", MinMaxScaler(), [2]),
+            ("context_normalizer", Normalizer(), slice(3, X_train.shape[1]))
         ], remainder="passthrough")
         output_scaler = Pipeline([
             ("robust", RobustScaler()),
-            ("sigmoid", FunctionTransformer(func=np.arcsinh, inverse_func=np.sinh, validate=False))
+            ("arcsinh", FunctionTransformer(func=np.arcsinh, inverse_func=np.sinh, validate=False))
         ])
-        context_scaler = StandardScaler()
 
         regressor_pipeline = Pipeline([
             ("scaler", input_scaler),
             ("model", model)
         ])
-        regressor = TransformedTargetRegressor(regressor_pipeline, output_scaler, context_scaler)
+        regressor = TransformedTargetRegressor(regressor=regressor_pipeline, transformer=output_scaler)
 
         regressor.fit(X_train, y_train)
 
+        if return_model:
+            return regressor
+
         y_test_pred = regressor.predict(X_test)
-        test_mape = np.mean(np.abs(y_test - y_test_pred) / y_test)
+        test_score = torch.nn.functional.huber_loss(torch.tensor(y_test_pred), torch.tensor(y_test)).item()
 
-        return test_mape
+        return test_score
 
-    storage = optuna.storages.JournalStorage(optuna.storages.JournalFileStorage("optuna.log"))
-    study = optuna.create_study(direction="minimize", study_name=f"ercot_{model_type}", storage=storage, load_if_exists=True)
+    storage = optuna.storages.JournalStorage(optuna.storages.JournalFileStorage("baseline_context_norm.log"))
+    if not eval:
+        study = optuna.create_study(direction="minimize", study_name=f"ercot_{model_type}", storage=storage, load_if_exists=True)
+        study.optimize(objective, n_trials=n_trials)
+    else:
+        for model_type in ["LR", "KNN", "RF", "GBT"]:
+            print(model_type)
+            study = optuna.load_study(study_name=f"ercot_{model_type}", storage=storage)
 
-    trials_per_worker = n_trials // multiprocessing.cpu_count()
-    ctx = multiprocessing.get_context("fork") if platform.system() == "Linux" else multiprocessing.get_context("spawn")
-    with ctx.Pool(multiprocessing.cpu_count()) as pool:
-        pool.starmap(study.optimize, [(objective, trials_per_worker)] * multiprocessing.cpu_count())
+            best_params = study.best_params
+            fixed = optuna.trial.FixedTrial(best_params)
+            best_model = objective(fixed, return_model=True)
+            best_model.fit(X_train, y_train)
 
-    print("Best parameters:")
-    best_params = study.best_params
-    print(best_params)
-    fixed = optuna.trial.FixedTrial(best_params)
-    best_model = objective(fixed, return_model=True)
+            # Evaluate best model on all data sets
+            y_train_pred = best_model.predict(X_train)
+            y_test_pred  = best_model.predict(X_test)
+            y_validate_pred = best_model.predict(X_validate)
 
-    # Evaluate best model on all data sets
-    y_train_pred = best_model.predict(X_train)
-    y_test_pred  = best_model.predict(X_test)
-    y_validate_pred = best_model.predict(X_validate)
+            train_score = torch.nn.functional.huber_loss(torch.tensor(y_train_pred), torch.tensor(y_train)).item()
+            test_score = torch.nn.functional.huber_loss(torch.tensor(y_test_pred), torch.tensor(y_test)).item()
+            validate_score = torch.nn.functional.huber_loss(torch.tensor(y_validate_pred), torch.tensor(y_validate)).item()
 
-    train_mape = np.mean(np.abs(y_train - y_train_pred) / y_train)
-    test_mape = np.mean(np.abs(y_test - y_test_pred) / y_test)
-    validate_mape = np.mean(np.abs(y_validate - y_validate_pred) / y_validate)
+            print("Huber Loss:")
+            print(f"... Train score: {train_score:.4}")
+            print(f"... Test  score: {test_score:.4}")
+            print(f"... Valid score: {validate_score:.4}")
+            print()
 
-    print("Calculating metrics for best model.")
-    print(f"... Train MAPE: {train_mape:.4}")
-    print(f"... Test  MAPE: {test_mape:.4}")
-    print(f"... Valid MAPE: {validate_mape:.4}")
+            train_score = within_perc_mape(y_train, y_train_pred)
+            test_score = within_perc_mape(y_test, y_test_pred)
+            validate_score = within_perc_mape(y_validate, y_validate_pred)
 
-    # Save the model
-    os.makedirs("models", exist_ok=True)
-    with open(f"ercot_{model_type.lower()}_train.pkl", "wb") as f:
-        pickle.dump(best_model, f)
+            print("Within 20%:")
+            print(f"... Train score: {train_score:.4}")
+            print(f"... Test  score: {test_score:.4}")
+            print(f"... Valid score: {validate_score:.4}")
+            print()
 
-    # Retrain the model on all data
-    print("Retraining best model on all data.")
-    best_model.fit(X, y)
-    y_train_pred_final = best_model.predict(X_train)
-    y_test_pred_final  = best_model.predict(X_test)
-    y_validate_pred_final = best_model.predict(X_validate)
+            # Save the model
+            os.makedirs("models", exist_ok=True)
+            with open(f"models/ercot_{model_type.lower()}_train_nocontext.pkl", "wb") as f:
+                pickle.dump(best_model, f)
 
-    train_mape_final = np.mean(np.abs(y_train - y_train_pred_final) / y_train)
-    test_mape_final = np.mean(np.abs(y_test - y_test_pred_final) / y_test)
-    validate_mape_final = np.mean(np.abs(y_validate - y_validate_pred_final) / y_validate)
+            # # Retrain the model on all data
+            # print("Retraining best model on all data.")
+            # best_model.fit(X.reshape(-1, X.shape[2]), y.reshape(-1))
+            # y_train_pred_final = best_model.predict(X_train)
+            # y_test_pred_final  = best_model.predict(X_test)
+            # y_validate_pred_final = best_model.predict(X_validate)
 
-    print("Calculating metrics for final model.")
-    print(f"... Train MAPE: {train_mape_final:.4}")
-    print(f"... Test  MAPE: {test_mape_final:.4}")
-    print(f"... Valid MAPE: {validate_mape_final:.4}")
+            # # train_score_final = torch.nn.functional.huber_loss(torch.tensor(y_train_pred_final), torch.tensor(y_train)).item()
+            # # test_score_final = torch.nn.functional.huber_loss(torch.tensor(y_test_pred_final), torch.tensor(y_test)).item()
+            # # validate_score_final = torch.nn.functional.huber_loss(torch.tensor(y_validate_pred_final), torch.tensor(y_validate)).item()
+            # train_score_final = within_perc_mape(y_train, y_train_pred_final)
+            # test_score_final = within_perc_mape(y_test, y_test_pred_final)
+            # validate_score_final = within_perc_mape(y_validate, y_validate_pred_final)
 
-    # Save the model
-    os.makedirs("models", exist_ok=True)
-    with open(f"ercot_{model_type.lower()}_all.pkl", "wb") as f:
-        pickle.dump(best_model, f)
+            # print(f"... Train score: {train_score_final:.4}")
+            # print(f"... Test  score: {test_score_final:.4}")
+            # print(f"... Valid score: {validate_score_final:.4}")
+            # print()
+
+            # # Save the model
+            # os.makedirs("models", exist_ok=True)
+            # with open(f"models/ercot_{model_type.lower()}_all_nocontext.pkl", "wb") as f:
+            #     pickle.dump(best_model, f)
 
 
 if __name__ == "__main__":

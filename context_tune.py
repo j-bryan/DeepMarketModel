@@ -4,7 +4,7 @@ import fire
 
 import torch
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, FunctionTransformer
+from sklearn.preprocessing import StandardScaler, FunctionTransformer, Normalizer
 from sklearn.pipeline import Pipeline
 from batched_preprocessing import BatchStandardScaler, BatchMinMaxScaler, BatchColumnTransformer, BatchRobustScaler
 from context_wrappers import ContextPipeline, ContextTransformedTargetRegressor, NeuralNetRegressor
@@ -27,6 +27,7 @@ def load_data(iso: str = "ERCOT"):
     # Context data, saved as monthly values. The time series data is hourly and will be segmented
     # into days, so the context data needs to be repeated for each day in the month.
     monthly_context = pd.read_csv(f"data/{iso.upper()}/monthly_context.csv", index_col=0)
+    monthly_context.pop("NGPRICE")  # Let's try without NGPRICE for now
     context_dates = pd.date_range(end="2022-12-01", periods=monthly_context.shape[0], freq="M")
     context = []
     for i, date in enumerate(context_dates):
@@ -44,9 +45,14 @@ def segment_array(x, segment_length):
     return x.reshape(-1, segment_length, x.shape[1])
 
 
+def within_perc_mape(y_true, y_pred, perc=0.2):
+    mape = np.abs((y_true - y_pred) / y_true)
+    return np.mean(mape < perc)
+
+
 def main(
     n_trials: int = 100,
-    epochs: int = 100,
+    epochs: int = 300,
     batch_size: int = 128
 ):
     X, y, context = load_data("ERCOT")
@@ -102,7 +108,7 @@ def main(
         optim = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
         net = NeuralNetRegressor(model=model,
                                 optimizer=optim,
-                                criterion=torch.nn.MSELoss(),
+                                criterion=torch.nn.HuberLoss(),
                                 epochs=epochs,
                                 batch_size=batch_size)
 
@@ -114,7 +120,7 @@ def main(
             ("robust", BatchRobustScaler()),
             ("sigmoid", FunctionTransformer(func=np.arcsinh, inverse_func=np.sinh, validate=False))
         ])
-        context_scaler = StandardScaler()
+        context_scaler = Normalizer()
 
         regressor_pipeline = ContextPipeline([
             ("scaler", input_scaler),
@@ -128,12 +134,12 @@ def main(
             return regressor
 
         y_test_pred = regressor.predict(X_test, context_test)
-        test_mape = np.mean(np.abs(y_test - y_test_pred) / y_test)
+        test_score = torch.nn.functional.huber_loss(torch.tensor(y_test_pred), torch.tensor(y_test)).item()
 
-        return test_mape
+        return test_score
 
-    storage = optuna.storages.JournalStorage(optuna.storages.JournalFileStorage("optuna.log"))
-    study = optuna.create_study(direction="minimize", study_name="ercot_final_nongprice", storage=storage, load_if_exists=True)
+    storage = optuna.storages.JournalStorage(optuna.storages.JournalFileStorage("seq2seq.log"))
+    study = optuna.create_study(direction="minimize", study_name="ercot", storage=storage, load_if_exists=True)
     study.optimize(objective, n_trials=n_trials)
 
     print("Best parameters:")
@@ -147,30 +153,23 @@ def main(
     y_test_pred  = best_model.predict(X_test, context_test)
     y_validate_pred = best_model.predict(X_validate, context_validate)
 
-    train_mape = np.mean(np.abs(y_train - y_train_pred) / y_train)
-    test_mape = np.mean(np.abs(y_test - y_test_pred) / y_test)
-    validate_mape = np.mean(np.abs(y_validate - y_validate_pred) / y_validate)
+    train_score = torch.nn.functional.huber_loss(torch.tensor(y_train_pred), torch.tensor(y_train)).item()
+    test_score = torch.nn.functional.huber_loss(torch.tensor(y_test_pred), torch.tensor(y_test)).item()
+    validate_score = torch.nn.functional.huber_loss(torch.tensor(y_validate_pred), torch.tensor(y_validate)).item()
 
-    print("Calculating metrics for best model.")
-    print(f"... Train MAPE: {train_mape:.4}")
-    print(f"... Test  MAPE: {test_mape:.4}")
-    print(f"... Valid MAPE: {validate_mape:.4}")
+    print("Huber Loss:")
+    print(f"... Train MAPE: {train_score:.4}")
+    print(f"... Test  MAPE: {test_score:.4}")
+    print(f"... Valid MAPE: {validate_score:.4}")
 
-    # Retrain the model on all data
-    print("Retraining best model on all data.")
-    best_model.fit(X, y, context)
-    y_train_pred_final = best_model.predict(X_train, context_train)
-    y_test_pred_final  = best_model.predict(X_test, context_test)
-    y_validate_pred_final = best_model.predict(X_validate, context_validate)
+    train_score = within_perc_mape(y_train, y_train_pred)
+    test_score = within_perc_mape(y_test, y_test_pred)
+    validate_score = within_perc_mape(y_validate, y_validate_pred)
 
-    train_mape_final = np.mean(np.abs(y_train - y_train_pred_final) / y_train)
-    test_mape_final = np.mean(np.abs(y_test - y_test_pred_final) / y_test)
-    validate_mape_final = np.mean(np.abs(y_validate - y_validate_pred_final) / y_validate)
-
-    print("Calculating metrics for final model.")
-    print(f"... Train MAPE: {train_mape_final:.4}")
-    print(f"... Test  MAPE: {test_mape_final:.4}")
-    print(f"... Valid MAPE: {validate_mape_final:.4}")
+    print("Within 20% MAPE:")
+    print(f"... Train: {train_score:.4}")
+    print(f"... Test: {test_score:.4}")
+    print(f"... Valid: {validate_score:.4}")
 
 
 if __name__ == "__main__":

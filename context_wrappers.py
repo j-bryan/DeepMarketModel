@@ -76,7 +76,13 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
         self.losses = None
 
     def fit(self, X, y, context, **kwargs):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # device = "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            device = "cuda"
+        # elif torch.backends.mps.is_available():
+        #     device = "mps"
+        else:
+            device = "cpu"
         self.model.to(device)
 
         X = torch.Tensor(X)
@@ -91,6 +97,7 @@ class NeuralNetRegressor(BaseEstimator, TransformerMixin):
 
         losses = torch.zeros(self.epochs, device=device, requires_grad=False)
         bar = tqdm(range(self.epochs))
+        # bar = range(self.epochs)
         for i in bar:
             total_loss = 0
             for input_tensor, target_tensor, context_tensor in loader:
