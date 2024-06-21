@@ -87,7 +87,7 @@ class NeuralNetRegressor:
     want to see if I can figure out why the FFNN model isn't working as expected and this gives me
     more control over the training loop.
     """
-    def __init__(self, module, optimizer, criterion=nn.HuberLoss(), device="cuda"):
+    def __init__(self, module, optimizer, criterion=nn.HuberLoss(), device="cuda", batch_size=256, epochs=100):
         self.module = module
         self.optimizer = optimizer
         self.criterion = criterion
@@ -99,15 +99,17 @@ class NeuralNetRegressor:
         else:
             self.device = torch.device("cpu")
         self.module.to(self.device)
+        self.batch_size = batch_size
+        self.epochs = epochs
 
-    def fit(self, X, y, batch_size=256, epochs=100):
+    def fit(self, X, y):
         if y.ndim == 1:
             self._y_is_1d = True
             y = y.reshape(-1, 1)
         dataset = torch.utils.data.TensorDataset(torch.tensor(X), torch.tensor(y))
-        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        bar = tqdm.trange(epochs)
+        bar = tqdm.trange(self.epochs)
         for epoch in bar:
             total_loss = 0
             for X_batch, y_batch in loader:
@@ -128,7 +130,11 @@ class NeuralNetRegressor:
         return yt
 
 
-def main():
+def main(
+    epochs: int = 500,
+    batch_size: int = 256,
+    device: str = "cuda"
+):
     # Segmenting, splitting, and re-flattening the data should give us the same train/test/validate
     # split that the context_tune.py script uses but formatted into hours for the baseline models.
     X, y, context = load_data("ERCOT")
@@ -144,88 +150,91 @@ def main():
     X_train = X_train.reshape(-1, X_train.shape[-1])
     X_test = X_test.reshape(-1, X_test.shape[-1])
     X_val = X_val.reshape(-1, X_val.shape[-1])
-    y_train = y_train.reshape(-1, 1)
-    y_test = y_test.reshape(-1, 1)
-    y_val = y_val.reshape(-1, 1)
+    y_train = y_train.reshape(-1)
+    y_test = y_test.reshape(-1)
+    y_val = y_val.reshape(-1)
 
-    # Transformations for input data
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('scale_col_0', StandardScaler(), [0]),
-            ('pass_cols_1_2', 'passthrough', [1, 2]),
-            ('l1_norm_rest', Normalizer(norm="l1"), slice(3, None))
-        ]
-    )
+    def objective(trial: optuna.trial.Trial):
+        # Transformations for input data
+        preprocessor = ColumnTransformer(
+            transformers=[
+                ('scale_col_0', StandardScaler(), [0]),
+                ('pass_cols_1_2', 'passthrough', [1, 2]),
+                ('l1_norm_rest', Normalizer(norm="l1"), slice(3, None))
+            ]
+        )
 
-    # Transformations for output data
-    output_transformer = Pipeline([
-        ('robust_scaler', RobustScaler()),
-        ('arcsinh', FunctionTransformer(func=np.arcsinh, inverse_func=np.sinh))
-    ])
+        # Transformations for output data
+        output_transformer = Pipeline([
+            ('robust_scaler', RobustScaler()),
+            ('arcsinh', FunctionTransformer(func=np.arcsinh, inverse_func=np.sinh))
+        ])
 
-    # Transform the data
-    X_train_t = preprocessor.fit_transform(X_train)
-    y_train_t = output_transformer.fit_transform(y_train)
+        n_hidden_layers = trial.suggest_int("n_hidden_layers", 1, 3)
+        n_units = trial.suggest_categorical("n_units", [512, 1024, 2048, 4096])
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
 
-    X_test_t = preprocessor.transform(X_test)
-    y_test_t = output_transformer.transform(y_test)
-    X_val_t = preprocessor.transform(X_val)
-    y_val_t = output_transformer.transform(y_val)
+        # Protect against running the same trial multiple times. If it's already been run, return
+        # the value from the previous run.
+        if not isinstance(trial, optuna.trial.FixedTrial):
+            states_to_consider = (optuna.trial.TrialState.COMPLETE,)
+            trials_to_consider = trial.study.get_trials(deepcopy=False, states=states_to_consider)
+            # Check whether we already evaluated the sampled `(x, y)`.
+            for t in reversed(trials_to_consider):
+                if trial.params == t.params:
+                    # Use the existing value as trial duplicated the parameters.
+                    return t.value
 
-    # Define Skorch regressor
-    # net = NeuralNetRegressor(
-    #     FeedforwardNN,
-    #     module__input_dim=X.shape[-1],
-    #     module__num_units=256,
-    #     module__num_hidden_layers=1,
-    #     max_epochs=3,
-    #     lr=1e-4,
-    #     optimizer=optim.Adam,
-    #     criterion=nn.HuberLoss,
-    #     batch_size=256,
-    #     train_split=None
-    # )
-    ffnn = FeedforwardNN(X_train_t.shape[-1], 4096, 3)
-    optimizer = optim.Adam(ffnn.parameters(), lr=1e-4)
-    net = NeuralNetRegressor(ffnn, optimizer, device="cpu")
+        ffnn = FeedforwardNN(X_train.shape[-1], num_hidden_layers=n_hidden_layers, num_units=n_units)
+        optimizer = optim.AdamW(ffnn.parameters(), lr=1e-4, weight_decay=weight_decay)
+        net = NeuralNetRegressor(ffnn, optimizer, device=device, epochs=epochs, batch_size=batch_size)
 
-    # Train the model
-    net.fit(X_train_t, y_train_t.flatten())
-    # net = RandomForestRegressor()
-    # net.fit(X_train_t, y_train_t.flatten())
+        regressor = TransformedTargetRegressor(
+            regressor=Pipeline([
+                ("scaler", preprocessor),
+                ("net", net)
+            ]),
+            transformer=output_transformer
+        )
 
-    # Example prediction
-    y_train_pred = net.predict(X_train_t)
-    y_train_pred_it = output_transformer.inverse_transform(y_train_pred.reshape(-1, 1))
-    y_test_pred = net.predict(X_test_t)
-    y_test_pred_it = output_transformer.inverse_transform(y_test_pred.reshape(-1, 1))
-    y_val_pred = net.predict(X_val_t)
-    y_val_pred_it = output_transformer.inverse_transform(y_val_pred.reshape(-1, 1))
-    y_avg = np.ones_like(y_train) * np.mean(y_train)
+        # Train the model
+        regressor.fit(X_train, y_train.flatten())
 
-    # Calculate Huber loss on untransformed data
-    train_loss = torch.nn.functional.huber_loss(torch.tensor(y_train_pred_it), torch.tensor(y_train)).item()
-    test_loss = torch.nn.functional.huber_loss(torch.tensor(y_test_pred_it), torch.tensor(y_test)).item()
-    val_loss = torch.nn.functional.huber_loss(torch.tensor(y_val_pred_it), torch.tensor(y_val)).item()
-    avg_loss = torch.nn.functional.huber_loss(torch.tensor(y_avg), torch.tensor(y_train)).item()
-    print("Huber Loss")
-    print(f"... Train: {train_loss:.4f}")
-    print(f"... Test: {test_loss:.4f}")
-    print(f"... Validation: {val_loss:.4f}")
-    print(f"... Average: {avg_loss:.4f}")
+        # Example prediction
+        y_train_pred = regressor.predict(X_train)
+        y_test_pred = regressor.predict(X_test)
+        y_val_pred = regressor.predict(X_val)
 
-    # Calculate Within 20% MAPE
-    train_mape = within_perc_mape(y_train.flatten(), y_train_pred_it.flatten(), perc=0.2)
-    test_mape = within_perc_mape(y_test.flatten(), y_test_pred_it.flatten(), perc=0.2)
-    val_mape = within_perc_mape(y_val.flatten(), y_val_pred_it.flatten(), perc=0.2)
-    avg_mape = within_perc_mape(y_train.flatten(), y_avg.flatten(), perc=0.2)
-    print("Within 20% MAPE")
-    print(f"... Train: {train_mape:.4f}")
-    print(f"... Test: {test_mape:.4f}")
-    print(f"... Validation: {val_mape:.4f}")
-    print(f"... Average: {avg_mape:.4f}")
+        # Calculate Huber loss on untransformed data
+        train_loss = torch.nn.functional.huber_loss(torch.tensor(y_train_pred), torch.tensor(y_train)).item()
+        test_loss = torch.nn.functional.huber_loss(torch.tensor(y_test_pred), torch.tensor(y_test)).item()
+        val_loss = torch.nn.functional.huber_loss(torch.tensor(y_val_pred), torch.tensor(y_val)).item()
+        print("Huber Loss")
+        print(f"... Train: {train_loss:.4f}")
+        print(f"... Test: {test_loss:.4f}")
+        print(f"... Validation: {val_loss:.4f}")
+
+        # Calculate Within 20% MAPE
+        train_mape = within_perc_mape(y_train, y_train_pred, perc=0.2)
+        test_mape = within_perc_mape(y_test, y_test_pred, perc=0.2)
+        val_mape = within_perc_mape(y_val, y_val_pred, perc=0.2)
+        print("Within 20% MAPE")
+        print(f"... Train: {train_mape:.4f}")
+        print(f"... Test: {test_mape:.4f}")
+        print(f"... Validation: {val_mape:.4f}")
+        return test_loss
+
+    storage = optuna.storages.JournalStorage(optuna.storage.JournalFileStorage("ffnn.log"))
+    study = optuna.create_study(study_name="ffnn", storage=storage, direction="minimize")
+    study.optimize(objective, n_trials=128)
+
+    best_params = study.best_params
+    print("\n\n\n")
+    print("Best Parameters")
+    print(best_params)
+    fixed_trial = optuna.trial.FixedTrial(best_params)
+    objective(fixed_trial)
 
 
 if __name__ == "__main__":
-    # fire.Fire(main)
-    main()
+    fire.Fire(main)
