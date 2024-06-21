@@ -209,7 +209,7 @@ def main(
         print(f"... Validation: {val_mape:.4f}")
         return test_loss
 
-    storage = optuna.storages.JournalStorage(optuna.storage.JournalFileStorage("ffnn.log"))
+    storage = optuna.storages.JournalStorage(optuna.storages.JournalFileStorage("ffnn.log"))
     study = optuna.create_study(study_name="ffnn", storage=storage, direction="minimize")
     study.optimize(objective, n_trials=128)
 
