@@ -109,7 +109,7 @@ class NeuralNetRegressor:
     def predict(self, X):
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X)
-        yt = self.module(X).detach().cpu().numpy()
+        yt = self.module(X.to(self.device)).detach().cpu().numpy()
         if self._y_is_1d:
             yt = yt.flatten()
         return yt
