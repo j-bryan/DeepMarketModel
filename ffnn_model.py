@@ -3,20 +3,14 @@ import pandas as pd
 import fire
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, FunctionTransformer, MinMaxScaler, RobustScaler, Normalizer
+from sklearn.preprocessing import StandardScaler, FunctionTransformer, RobustScaler, Normalizer
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.pipeline import Pipeline
-from skorch.regressor import NeuralNetRegressor
-
-from sklearn.linear_model import SGDRegressor
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 
 import optuna
 import torch
+from torch import nn, optim
 import tqdm
-import os
-import pickle
 
 
 def load_data(iso: str = "ERCOT"):
@@ -53,15 +47,6 @@ def segment_array(x, segment_length):
 def within_perc_mape(y_true, y_pred, perc=0.2):
     mape = np.abs((y_true - y_pred) / y_true)
     return np.mean(mape < perc)
-
-
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, RobustScaler, FunctionTransformer, Normalizer
-from sklearn.compose import ColumnTransformer
 
 
 # Define the neural network
@@ -132,7 +117,7 @@ class NeuralNetRegressor:
 
 def main(
     epochs: int = 500,
-    batch_size: int = 256,
+    batch_size: int = 1024,
     device: str = "cuda"
 ):
     # Segmenting, splitting, and re-flattening the data should give us the same train/test/validate
