@@ -29,9 +29,13 @@ class PinballLoss(torch.nn.Module):
         Target to predict.
     self.quantiles : torch.tensor
     """
-    def __init__(self, quantiles=torch.tensor([0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]), device="cuda"):
+    def __init__(self, quantiles: torch.Tensor | None = None):
         super(PinballLoss, self).__init__()
-        self.quantiles = quantiles.to(device)
+        if quantiles is None:
+            quantiles = torch.tensor([0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98])
+        # Keeps the quantiles tensor on the same device as everything else and will be a part of
+        # the state dict, but it's not a parameter that needs to be optimized.
+        self.register_buffer("quantiles", quantiles)
 
     def forward(self, pred, target):
         """
@@ -181,8 +185,8 @@ def main(
                 ], remainder="passthrough")),
             ("ffnn", Regressor(model=ffnn,
                                optimizer=torch.optim.Adam,
-                               optimizer__lr=1e-3,
-                               optimizer__weight_decay=1e-4,
+                               optimizer__lr=5e-4,
+                               optimizer__weight_decay=0.0,
                                loss_fn=PinballLoss(device=device),
                                device=device,
                                epochs=epochs,
