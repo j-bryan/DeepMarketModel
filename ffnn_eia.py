@@ -187,7 +187,7 @@ def main(
                                optimizer=torch.optim.Adam,
                                optimizer__lr=5e-4,
                                optimizer__weight_decay=0.0,
-                               loss_fn=PinballLoss(device=device),
+                               loss_fn=PinballLoss(),
                                device=device,
                                epochs=epochs,
                                batch_size=batch_size))
@@ -198,13 +198,14 @@ def main(
             ("arcsinh", FunctionTransformer(torch.arcsinh, torch.sinh, validate=False))
         ])
 
-        X_train_t = torch.tensor(X_train).float().to(device)
-        y_train_t = torch.tensor(y_train).float().unsqueeze(-1).to(device)
+        X_train_pt = torch.tensor(X_train).float().to(device)
+        y_train_pt = torch.tensor(y_train).float().unsqueeze(-1).to(device)
 
         # Model with transformed features and target
-        model = TransformedTargetRegressor(regressor, output_scaler).fit(X_train_t, y_train_t)
-        plt.plot(model.regressor.get("ffnn").losses)
-        plt.show()
+        torch.autograd.set_detect_anomaly(True)
+        model = TransformedTargetRegressor(regressor, output_scaler).fit(X_train_pt, y_train_pt)
+        # plt.plot(model.regressor.get("ffnn").losses)
+        # plt.show()
 
         if return_model:
             return model
@@ -238,44 +239,45 @@ def main(
     }
     fixed = optuna.trial.FixedTrial(best_params)
     best_model = objective(fixed, return_model=True)
+    best_model.eval()
 
     # Evaluate best model on all data sets
     best_model = best_model.to("cpu")
-    X_train = torch.tensor(X_train).float().to("cpu")
-    X_test = torch.tensor(X_test).float().to("cpu")
-    X_validate = torch.tensor(X_validate).float().to("cpu")
-    y_train_pred = best_model.predict(X_train).squeeze()
-    y_test_pred  = best_model.predict(X_test).squeeze()
-    y_validate_pred = best_model.predict(X_validate).squeeze()
+    X_train_pt = torch.tensor(X_train).float().to("cpu")
+    X_test_pt = torch.tensor(X_test).float().to("cpu")
+    X_validate_pt = torch.tensor(X_validate).float().to("cpu")
+    y_train_pred = best_model.predict(X_train_pt).squeeze()
+    y_test_pred  = best_model.predict(X_test_pt).squeeze()
+    y_validate_pred = best_model.predict(X_validate_pt).squeeze()
 
-    y_train = torch.tensor(y_train).float().to("cpu").squeeze()
-    y_test = torch.tensor(y_test).float().to("cpu").squeeze()
-    y_validate = torch.tensor(y_validate).float().to("cpu").squeeze()
+    y_train_pt = torch.tensor(y_train).float().to("cpu").squeeze()
+    y_test_pt = torch.tensor(y_test).float().to("cpu").squeeze()
+    y_validate_pt = torch.tensor(y_validate).float().to("cpu").squeeze()
 
     # Huber loss
-    train_score = torch.nn.functional.huber_loss(y_train_pred, y_train).item()
-    test_score = torch.nn.functional.huber_loss(y_test_pred, y_test).item()
-    validate_score = torch.nn.functional.huber_loss(y_validate_pred, y_validate).item()
+    train_score = torch.nn.functional.huber_loss(y_train_pred, y_train_pt).item()
+    test_score = torch.nn.functional.huber_loss(y_test_pred, y_test_pt).item()
+    validate_score = torch.nn.functional.huber_loss(y_validate_pred, y_validate_pt).item()
     print(f"{model_type:<10}{'Huber Loss':<20}{train_score:12.4f}{test_score:12.4f}{validate_score:12.4f}")
 
     # MAPE < 20%
-    train_score = within_perc_mape(y_train, y_train_pred)
-    test_score = within_perc_mape(y_test, y_test_pred)
-    validate_score = within_perc_mape(y_validate, y_validate_pred)
+    train_score = within_perc_mape(y_train_pt, y_train_pred)
+    test_score = within_perc_mape(y_test_pt, y_test_pred)
+    validate_score = within_perc_mape(y_validate_pt, y_validate_pred)
     print(f"{model_type:<10}{'MAPE < 20%':<20}{train_score:12.4f}{test_score:12.4f}{validate_score:12.4f}")
 
     # Pinball loss
-    pinball = PinballLoss(device="cpu")
-    train_score = pinball(y_train_pred, y_train).item()
-    test_score = pinball(y_test_pred, y_test).item()
-    validate_score = pinball(y_validate_pred, y_validate).item()
+    pinball = PinballLoss()
+    train_score = pinball(y_train_pred, y_train_pt).item()
+    test_score = pinball(y_test_pred, y_test_pt).item()
+    validate_score = pinball(y_validate_pred, y_validate_pt).item()
     print(f"{model_type:<10}{'Pinball Loss':<20}{train_score:12.4f}{test_score:12.4f}{validate_score:12.4f}")
 
 
     fig, ax = plt.subplots(1, 3, figsize=(12, 8))
     ax[0].plot(y_train, label="True")
     ax[1].plot(y_test, label="True")
-    ax[2].plot(y_validate, label="True")
+    ax[2].plot(y_validate_pt, label="True")
 
     ax[0].plot(y_train_pred.detach().cpu().numpy(), label=model_type)
     ax[1].plot(y_test_pred.detach().cpu().numpy(), label=model_type)
@@ -290,10 +292,9 @@ def main(
 
     plt.savefig("july11_samples.png")
 
-    # # Save the model
+    # Save the model
     os.makedirs("models", exist_ok=True)
-    with open(f"models/ffnn.pk", "wb") as f:
-        pickle.dump(best_model, f)
+    torch.save(best_model.to("cpu"), "models/ffnn_test.pt")
 
     dfs["train"][model_type] = y_train_pred.detach().cpu().numpy().ravel()
     dfs["test"][model_type] = y_test_pred.detach().cpu().numpy().ravel()
@@ -301,6 +302,23 @@ def main(
 
     for k, df in dfs.items():
         df.to_csv(f"{k}_predictions.csv")
+
+    # Reload the model and make sure it works exactly the same
+    loaded_model = torch.load("models/ffnn_test.pt")
+    loaded_model = loaded_model.to("cpu")
+
+    X_train_pt = torch.tensor(X_train).float().to("cpu")
+    y_train_pred = best_model(X_train_pt).squeeze()
+
+    X_train_pt = torch.tensor(X_train).float().to("cpu")
+    y_train_pred_reload = loaded_model(X_train_pt).squeeze()
+
+    if not torch.allclose(y_train_pred, y_train_pred_reload):
+        print()
+        print("Predictions don't match!")
+        print("... Avg Diff:", torch.mean(torch.abs(y_train_pred - y_train_pred_reload)).item())
+        print("... Max Diff:", torch.max(torch.abs(y_train_pred - y_train_pred_reload)).item())
+        print()
 
 
 if __name__ == "__main__":
